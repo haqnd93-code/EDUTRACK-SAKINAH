@@ -12,6 +12,9 @@
     </script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js">
     </script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
     <style>
         :root { --primary: #6366f1; --success: #10b981; --warning: #f59e0b; --danger: #ef4444; --bg: #f1f5f9; --text: #1e293b; --border: #e2e8f0; }
@@ -769,8 +772,8 @@ const MASTER_LOGIN_PASSWORD = "931014";
 let adminSessionUnlocked = false;
 const ADMIN_REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 jam sebelum tamat
 const ADMIN_REMINDER_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // popup setiap 1 jam
-// ===== STORAGE ENGINE (RAW - TIADA PERGABUNGAN CLOUD) =====
-// Data disimpan secara tempatan sahaja (localStorage) buat masa ini.
+// ===== STORAGE ENGINE (Firebase Firestore + salinan setempat) =====
+// Data disimpan di Firestore (dikongsi antara peranti) dan salinan sandaran di localStorage.
 // Sediakan fungsi loadAll()/saveAll() di bawah sebagai titik integrasi
 // backend/cloud baharu (contoh: Firebase, Supabase, REST API, dsb).
 const LOCAL_STORAGE_KEY = "et_state_v1";
@@ -1141,42 +1144,305 @@ function lihatPemetaanExam() {
         }
 
         // ---------------------------------------------------------------
-        // TITIK INTEGRASI BACKEND / CLOUD BAHARU
+        // FIREBASE / FIRESTORE - penyimpanan awan + segerak antara peranti
         // ---------------------------------------------------------------
-        // Fail ini sengaja "mentah" - hanya menggunakan localStorage pelayar
-        // sebagai storan data. Untuk menyambungkannya semula ke Firebase,
-        // Supabase, REST API sendiri, dsb, ubahsuai 3 fungsi di bawah:
-        //   1. loadState()  -> baca data awal dari backend/cloud pilihan anda
-        //   2. persistState(payload) -> hantar/simpan data ke backend/cloud
-        //   3. (opsyenal) tambah realtime listener yang memanggil
-        //      applyStatePayload(data) + migrateAllDataKeysByYear() +
-        //      renderCurrentPage() apabila ada perubahan dari peranti lain
+        // Struktur data dalam Firestore (koleksi "edutrack_data"):
+        //   meta                      -> senarai subjek, kelas, tahun, minggu, kunci admin
+        //   allData__<kunci>          -> 1 dokumen bagi setiap Tahun||Subjek||Kelas
+        //   bookMonths__<bulan>, pbdData__<kunci>, dskpDatabase__<kunci>,
+        //   itemConfigGlobal__<kunci>, completedExams__<kunci>, examNamesCustom__<kunci>
+        // Setiap dokumen menyimpan data sebagai teks JSON (medan "json") supaya
+        // selamat daripada had Firestore (tatasusunan bersarang) dan had 1 MiB
+        // dikira bagi setiap kelas/subjek, bukan keseluruhan aplikasi.
         // ---------------------------------------------------------------
+        const firebaseConfig = {
+            apiKey: "AIzaSyBzEDNikA5GrB_p43zwGCyiE0MWx9eS88g",
+            authDomain: "edutrack-sakinah.firebaseapp.com",
+            projectId: "edutrack-sakinah",
+            storageBucket: "edutrack-sakinah.firebasestorage.app",
+            messagingSenderId: "948283892981",
+            appId: "1:948283892981:web:a83e8f970d5a4e2a6851bc",
+            measurementId: "G-JMFDW7DQTS"
+        };
+        const FS_COLLECTION = "edutrack_data";
+        const FS_MAP_SECTIONS = ["allData", "bookMonths", "pbdData", "dskpDatabase", "itemConfigGlobal", "completedExams", "examNamesCustom"];
+        const FS_META_FIELDS = ["allSubjects", "allClasses", "allYears", "currentYear", "masterWeeks", "adminSystemLock"];
 
-        async function loadState() {
-            if (typeof localStorage === "undefined") return null;
-            return safeParseJSON(localStorage.getItem(LOCAL_STORAGE_KEY), null);
+        let fsDb = null, fsAuth = null;
+        let fsReady = false;          // true selepas berjaya sambung & muat data dari awan
+        let fsChunks = {};            // docId -> {section, key, json} (keadaan terakhir di awan)
+        let fsQueue = Promise.resolve();
+        let fsRemoteTimer = null, fsRemoteMetaChanged = false;
+        let fsStatus = { state: "connecting", msg: "" };
+
+        // ---------- Penunjuk status (kanan bawah) ----------
+        function setSyncStatus(state, msg) {
+            fsStatus = { state: state, msg: msg || "" };
+            if (!document.body) return;
+            let el = document.getElementById("syncPill");
+            if (!el) {
+                el = document.createElement("div");
+                el.id = "syncPill";
+                el.style.cssText = "position:fixed;right:14px;bottom:14px;z-index:900;padding:7px 14px;border-radius:20px;font-size:0.72rem;font-weight:600;color:#fff;box-shadow:0 2px 10px rgba(0,0,0,0.2);max-width:80vw;cursor:default;";
+                el.className = "no-print";
+                document.body.appendChild(el);
+                let st = document.createElement("style");
+                st.textContent = "@media print{#syncPill{display:none!important}}";
+                document.head.appendChild(st);
+            }
+            const map = {
+                connecting: ["☁️ Menyambung…", "#64748b"],
+                ok:         ["☁️ Disegerakkan", "#10b981"],
+                saving:     ["☁️ Menyimpan…", "#6366f1"],
+                remote:     ["🔄 Data dikemas kini dari peranti lain", "#6366f1"],
+                local:      ["⚠️ Tiada sambungan awan – data hanya disimpan pada peranti ini (klik untuk cuba semula)", "#f59e0b"],
+                error:      ["❌ Ralat awan (klik untuk cuba semula)", "#ef4444"]
+            };
+            const m = map[state] || map.ok;
+            el.textContent = m[0];
+            el.style.background = m[1];
+            el.title = msg || "";
+            el.style.cursor = (state === "local" || state === "error") ? "pointer" : "default";
+            el.onclick = (state === "local" || state === "error") ? function () { location.reload(); } : null;
         }
 
-        async function persistState(payload) {
-            if (typeof localStorage === "undefined") return;
-            try {
-                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
-            } catch (err) {
-                console.error("Gagal simpan data:", err);
+        // ---------- Pecah / gabung keadaan ----------
+        function fsDocId(section, key) {
+            return section + "__" + encodeURIComponent(key);
+        }
+
+        function splitPayload(payload) {
+            let out = {};
+            let meta = {};
+            FS_META_FIELDS.forEach(f => { meta[f] = payload[f]; });
+            out["meta"] = { section: "meta", key: "meta", json: JSON.stringify(meta) };
+            FS_MAP_SECTIONS.forEach(section => {
+                let obj = payload[section] || {};
+                Object.keys(obj).forEach(k => {
+                    out[fsDocId(section, k)] = { section: section, key: k, json: JSON.stringify(obj[k]) };
+                });
+            });
+            return out;
+        }
+
+        function joinChunks(chunks) {
+            let payload = {};
+            FS_MAP_SECTIONS.forEach(s => { payload[s] = {}; });
+            Object.keys(chunks).forEach(id => {
+                let c = chunks[id];
+                let val;
+                try { val = JSON.parse(c.json); } catch (e) { return; }
+                if (c.section === "meta") {
+                    Object.assign(payload, val);
+                } else if (payload[c.section]) {
+                    payload[c.section][c.key] = val;
+                }
+            });
+            return payload;
+        }
+
+        function getSectionObj(section) {
+            switch (section) {
+                case "allData": return allData;
+                case "bookMonths": return bookMonths;
+                case "pbdData": return pbdData;
+                case "dskpDatabase": return dskpDatabase;
+                case "itemConfigGlobal": return itemConfigGlobal;
+                case "completedExams": return completedExams;
+                case "examNamesCustom": return examNamesCustom;
             }
+            return null;
+        }
+
+        // ---------- Sambungan ke Firestore ----------
+        function fsConnect() {
+            return new Promise((resolve, reject) => {
+                if (typeof firebase === "undefined") {
+                    return reject(new Error("SDK Firebase tidak dapat dimuatkan (semak sambungan internet)."));
+                }
+                try {
+                    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+                    fsDb = firebase.firestore();
+                    fsAuth = firebase.auth();
+                } catch (e) { return reject(e); }
+
+                let settled = false;
+                const timer = setTimeout(() => {
+                    if (!settled) { settled = true; reject(new Error("Tamat masa menyambung ke Firestore.")); }
+                }, 12000);
+
+                fsAuth.signInAnonymously().then(() => {
+                    fsDb.collection(FS_COLLECTION).onSnapshot(snap => {
+                        if (!settled) {
+                            if (snap.metadata.fromCache) return; // tunggu data sebenar dari pelayan
+                            settled = true; clearTimeout(timer);
+                            let docs = [];
+                            snap.forEach(d => docs.push({ id: d.id, data: d.data() }));
+                            resolve(docs);
+                            return;
+                        }
+                        handleRemoteSnapshot(snap);
+                    }, err => {
+                        if (!settled) { settled = true; clearTimeout(timer); reject(err); }
+                        else setSyncStatus("error", err && err.message);
+                    });
+                }).catch(err => {
+                    if (!settled) { settled = true; clearTimeout(timer); reject(err); }
+                });
+            });
+        }
+
+        // ---------- Terima perubahan dari peranti lain ----------
+        function handleRemoteSnapshot(snap) {
+            let changed = false, metaChanged = false;
+            snap.docChanges().forEach(ch => {
+                if (ch.doc.metadata.hasPendingWrites) return; // tulisan kita sendiri
+                let id = ch.doc.id;
+                if (ch.type === "removed") {
+                    let old = fsChunks[id];
+                    if (!old) return;
+                    delete fsChunks[id];
+                    if (old.section !== "meta") {
+                        let obj = getSectionObj(old.section);
+                        if (obj) delete obj[old.key];
+                    }
+                    changed = true;
+                } else {
+                    let d = ch.doc.data();
+                    if (fsChunks[id] && fsChunks[id].json === d.json) return;
+                    let val;
+                    try { val = JSON.parse(d.json); } catch (e) { return; }
+                    fsChunks[id] = { section: d.section, key: d.key, json: d.json };
+                    if (d.section === "meta") {
+                        let p = buildStatePayload();
+                        Object.assign(p, val);
+                        applyStatePayload(p);
+                        metaChanged = true;
+                    } else {
+                        let obj = getSectionObj(d.section);
+                        if (obj) obj[d.key] = val;
+                    }
+                    changed = true;
+                }
+            });
+            if (changed) scheduleRemoteRender(metaChanged);
+        }
+
+        function scheduleRemoteRender(metaChanged) {
+            if (metaChanged) fsRemoteMetaChanged = true;
+            clearTimeout(fsRemoteTimer);
+            fsRemoteTimer = setTimeout(runRemoteRender, 500);
+        }
+
+        function runRemoteRender() {
+            // Jangan ganggu pengguna yang sedang menaip / ada modal terbuka
+            let modalOpen = Array.from(document.querySelectorAll(".modal")).some(m => m.style.display === "flex" || m.style.display === "block");
+            let ae = document.activeElement;
+            let typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA");
+            if (modalOpen || typing) {
+                fsRemoteTimer = setTimeout(runRemoteRender, 3000);
+                return;
+            }
+            try {
+                if (fsRemoteMetaChanged) {
+                    refreshSelectors();
+                    if (typeof refreshSettingsSelects === "function") refreshSettingsSelects();
+                    if (typeof setAdminNavVisibility === "function") setAdminNavVisibility();
+                    if (typeof setSystemControlsLocked === "function") setSystemControlsLocked();
+                }
+                renderCurrentPage();
+                setSyncStatus("remote");
+                setTimeout(() => { if (fsStatus.state === "remote") setSyncStatus("ok"); }, 3000);
+            } catch (err) {
+                console.error("Gagal muat semula paparan:", err);
+            }
+            fsRemoteMetaChanged = false;
+        }
+
+        // ---------- Simpan (hanya dokumen yang berubah) ----------
+        async function fsSync(payload) {
+            const next = splitPayload(payload);
+            let ops = [];
+            Object.keys(next).forEach(id => {
+                if (!fsChunks[id] || fsChunks[id].json !== next[id].json) ops.push({ t: "set", id: id, data: next[id] });
+            });
+            Object.keys(fsChunks).forEach(id => {
+                if (!next[id]) ops.push({ t: "del", id: id });
+            });
+            if (!ops.length) return;
+            setSyncStatus("saving");
+            let who = "";
+            try { who = currentUser ? currentUser.name : ""; } catch (e) { }
+            for (let i = 0; i < ops.length; i += 400) {
+                let slice = ops.slice(i, i + 400);
+                let batch = fsDb.batch();
+                slice.forEach(op => {
+                    let ref = fsDb.collection(FS_COLLECTION).doc(op.id);
+                    if (op.t === "set") {
+                        batch.set(ref, {
+                            section: op.data.section,
+                            key: op.data.key,
+                            json: op.data.json,
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                            updatedBy: String(who || "")
+                        });
+                    } else {
+                        batch.delete(ref);
+                    }
+                });
+                await batch.commit();
+                slice.forEach(op => {
+                    if (op.t === "set") fsChunks[op.id] = op.data;
+                    else delete fsChunks[op.id];
+                });
+            }
+            setSyncStatus("ok");
+        }
+
+        function persistState(payload) {
+            // Salinan setempat sentiasa disimpan (sandaran jika tiada internet)
+            try { localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload)); } catch (err) { console.error("Gagal simpan salinan setempat:", err); }
+            if (!fsReady) return Promise.resolve();
+            fsQueue = fsQueue.then(() => fsSync(payload)).catch(err => {
+                console.error("Gagal simpan ke Firestore:", err);
+                setSyncStatus("error", err && err.message);
+            });
+            return fsQueue;
         }
 
         async function loadCloudState() {
             cloudHydrated = false;
+            setSyncStatus("connecting");
+            let local = null;
+            try { local = safeParseJSON(localStorage.getItem(LOCAL_STORAGE_KEY), null); } catch (e) { }
             try {
-                let saved = await loadState();
-                if (saved) {
-                    applyStatePayload(saved);
+                let docs = await fsConnect();
+                fsChunks = {};
+                docs.forEach(d => {
+                    let x = d.data || {};
+                    if (typeof x.json === "string") fsChunks[d.id] = { section: x.section, key: x.key, json: x.json };
+                });
+                if (Object.keys(fsChunks).length > 0) {
+                    // Awan ada data -> awan dijadikan sumber utama
+                    applyStatePayload(joinChunks(fsChunks));
                     migrateAllDataKeysByYear();
+                    fsReady = true;
+                } else if (local) {
+                    // Awan kosong tetapi peranti ini ada data lama -> naikkan ke awan (migrasi sekali sahaja)
+                    applyStatePayload(local);
+                    migrateAllDataKeysByYear();
+                    fsReady = true;
+                    cloudHydrated = true;
+                    await persistState(buildStatePayload());
+                } else {
+                    fsReady = true; // pangkalan data baharu sepenuhnya
                 }
+                setSyncStatus("ok");
             } catch (err) {
-                console.error("Gagal muat data:", err);
+                console.error("Gagal sambung Firestore:", err);
+                fsReady = false;
+                if (local) { applyStatePayload(local); migrateAllDataKeysByYear(); }
+                setSyncStatus("local", err && (err.code ? err.code + ": " : "") + (err && err.message));
             } finally {
                 cloudHydrated = true;
             }
@@ -1184,8 +1450,7 @@ function lihatPemetaanExam() {
 
         function queueCloudSave(immediate) {
             if (!cloudHydrated) return;
-            let payload = buildStatePayload();
-            let saveNow = () => { persistState(payload); };
+            let saveNow = () => { saveTimer = null; persistState(buildStatePayload()); };
             if (saveTimer) {
                 clearTimeout(saveTimer);
                 saveTimer = null;
@@ -1196,6 +1461,14 @@ function lihatPemetaanExam() {
                 saveTimer = setTimeout(saveNow, 450);
             }
         }
+
+        // Pastikan perubahan terakhir dihantar apabila tab ditutup / disembunyikan
+        document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "hidden" && saveTimer) queueCloudSave(true);
+        });
+        window.addEventListener("pagehide", function () {
+            if (saveTimer) queueCloudSave(true);
+        });
 
         function buildDataKey(subject, className, yearOverride) {
             let y = yearOverride || document.getElementById("selectYear")?.value || currentYear || String(new Date().getFullYear());
