@@ -1178,6 +1178,9 @@ function lihatPemetaanExam() {
         // ---------- Penunjuk status (kanan bawah) ----------
         function setSyncStatus(state, msg) {
             fsStatus = { state: state, msg: msg || "" };
+            // Penunjuk status disembunyikan (tukar kepada true untuk papar semula)
+            const SHOW_SYNC_PILL = false;
+            if (!SHOW_SYNC_PILL) return;
             if (!document.body) return;
             let el = document.getElementById("syncPill");
             if (!el) {
@@ -6795,5 +6798,3 @@ ${reportHTML}
     </div>
 </body>
 </html>
-
-
