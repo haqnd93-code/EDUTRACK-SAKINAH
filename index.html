@@ -6034,8 +6034,9 @@ function salinSenaraiPelajar() {
                     else if(json.levels){
                         Object.keys(json.levels).forEach(tingKey => {
                             let levelData = json.levels[tingKey];
-                            let match = tingKey.match(/tingkatan[_\s]*(\d+)/i);
-                            let tingNum = match ? parseInt(match[1]) : (levelData.level || 5);
+                            let match = String(tingKey).match(/tingkatan[_\s]*(\d+)/i);
+                            // Sokong: key objek "tingkatan_4", atau levels[] array dengan medan tingkatan/level/form (cth. Perniagaan)
+                            let tingNum = match ? parseInt(match[1]) : (parseInt(levelData.tingkatan || levelData.level || levelData.form) || 5);
                             let tingFormatted = "Tingkatan " + tingNum;
 
                             let skills = normalizeDSKPLevel(levelData);
