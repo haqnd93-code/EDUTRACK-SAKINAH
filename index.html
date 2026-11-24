@@ -381,7 +381,11 @@
         }
         #modalPilihanCetak .pc-btn-batal:hover { background: #f1f5f9; }
         .print-analysis-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center; }
-        .print-report-container { background: #fff; border-radius: 16px; padding: 20px; width: 95%; max-width: 1200px; max-height: 90vh; overflow-y: auto; }
+        .print-report-container { background: #fff; border-radius: 16px; padding: 20px; width: 98%; max-width: 1800px; max-height: 92vh; overflow-y: auto; }
+        .an-wrap.an-wrap-full { position:fixed; inset:0; z-index:100000; background:#fff; overflow:auto !important; padding:10px 14px; }
+        .an-wrap:fullscreen { background:#fff; overflow:auto !important; padding:10px 14px; }
+        .an-fs-exit { display:none; }
+        .an-wrap-full .an-fs-exit { display:block; position:sticky; top:0; left:100%; width:max-content; margin:0 0 6px auto; z-index:5; background:#dc2626; color:#fff; border:none; border-radius:8px; padding:6px 14px; font-weight:700; font-size:0.8rem; cursor:pointer; box-shadow:0 2px 8px rgba(0,0,0,.25); }
         .print-header { text-align: center; padding: 10px 0; border-bottom: 2px solid #1e293b; margin-bottom: 15px; }
         .print-header h2 { font-size: 1rem; font-weight: 800; margin: 0; }
         .print-header p { font-size: 0.7rem; color: #64748b; margin: 5px 0 0 0; }
@@ -4304,13 +4308,14 @@ function jalanCetakAnalisis(examPilihan){
     html += '<div class="no-print" style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;justify-content:space-between;align-items:center;">';
     html += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
     html += '<button class="btn btn-primary" onclick="tunjukPilihanCetak()"><i class="fas fa-print"></i> Cetak</button>';
+    html += '<button class="btn btn-accent" id="btnFsAnalisis" onclick="toggleFullscreenAnalisis()"><i class="fas fa-expand"></i> Skrin Penuh Jadual</button>';
     html += '<button class="btn btn-ghost" onclick="bukaCetakAnalisisItem()">← Tukar Peperiksaan</button>';
     html += '</div>';
     html += '<div style="display:flex;gap:8px;">';
     html += '<button class="btn" onclick="hlLemah(\''+tableId+'\')" style="background:#dc2626;color:white;font-size:0.78rem;"><i class="fas fa-exclamation-triangle"></i> Highlight &lt;50%</button>';
     html += '<button class="btn" onclick="hlReset(\''+tableId+'\')" style="background:#f59e0b;color:white;font-size:0.78rem;"><i class="fas fa-undo-alt"></i> Reset</button>';
     html += '</div>';
-    html += '<button class="btn btn-ghost" onclick="document.getElementById(\'modalCetakAnalisis\').style.display=\'none\'">✕ Tutup</button>';
+    html += '<button class="btn btn-ghost" onclick="tutupModalAnalisis()">✕ Tutup</button>';
     html += '</div>';
 
     // Pilihan warna header (tidak cetak)
@@ -4346,7 +4351,8 @@ function jalanCetakAnalisis(examPilihan){
     html += '</div>';
 
     // JADUAL TUNGGAL — semua pelajar
-    html += '<div style="overflow-x:auto;">';
+    html += '<div class="an-wrap" id="wrap_'+tableId+'" style="overflow-x:auto;">';
+    html += '<button type="button" class="an-fs-exit no-print" onclick="toggleFullscreenAnalisis()">✕ Keluar Skrin Penuh</button>';
     html += '<table id="'+tableId+'" style="width:100%;border-collapse:collapse;font-size:0.78rem;">';
     html += '<thead>'+mkHeader()+'</thead>';
     html += '<tbody>'+mkRows()+'</tbody>';
@@ -4354,6 +4360,11 @@ function jalanCetakAnalisis(examPilihan){
 
     // CSS highlight
     html += '<style>';
+    // ===== MOD PADAT: semua lajur muat satu skrin / satu halaman =====
+    html += '#'+tableId+'.an-padat th, #'+tableId+'.an-padat td { padding:3px 2px !important; font-size:0.7rem !important; }';
+    html += '#'+tableId+'.an-padat thead tr:first-child th:nth-child(2), #'+tableId+'.an-padat tbody td:nth-child(2) { min-width:120px !important; max-width:150px; text-align:left !important; padding:3px 5px !important; font-size:0.68rem !important; line-height:1.15; }';
+    html += '#'+tableId+'.an-padat td, #'+tableId+'.an-padat th { min-width:18px; }';
+    html += '@media print { .an-wrap { overflow:visible !important; } }';
     html += '#'+tableId+' tr.hl-lemah { background:#fee2e2 !important; border-left:3px solid #dc2626 !important; }';
     html += '#'+tableId+' tr.hl-lemah td { background:#fee2e2 !important; }';
     html += '#'+tableId+' tr.hl-pilih { background:#fef9c3 !important; border-left:3px solid #eab308 !important; }';
@@ -4363,9 +4374,64 @@ function jalanCetakAnalisis(examPilihan){
     document.getElementById("printAnalysisReport").innerHTML = html;
     document.getElementById("modalCetakAnalisis").style.display = "flex";
     aplikasiWarnaAnalisis(subjek);
+    setTimeout(function(){ fitAnalisisTable(tableId); }, 30);
+    if(window._anFitHandler) window.removeEventListener('resize', window._anFitHandler);
+    window._anFitHandler = function(){ fitAnalisisTable(tableId); };
+    window.addEventListener('resize', window._anFitHandler);
 
     // Auto highlight pelajar lemah
     setTimeout(function(){ hlLemah(tableId); }, 80);
+}
+
+// ===== SKRIN PENUH — JADUAL SAHAJA =====
+function _anWrap(){ return document.querySelector('#printAnalysisReport .an-wrap'); }
+function _anRefit(){
+    let t = document.querySelector('#printAnalysisReport table[id^="analisisTable_"]');
+    if(t) fitAnalisisTable(t.id);
+}
+function _anSyncBtn(){
+    let w = _anWrap(), b = document.getElementById('btnFsAnalisis');
+    if(b && w) b.innerHTML = w.classList.contains('an-wrap-full') ? '<i class="fas fa-compress"></i> Keluar Skrin Penuh' : '<i class="fas fa-expand"></i> Skrin Penuh Jadual';
+}
+function toggleFullscreenAnalisis(){
+    let w = _anWrap();
+    if(!w) return;
+    if(w.classList.contains('an-wrap-full')){
+        w.classList.remove('an-wrap-full');
+        if(document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function(){});
+    } else {
+        w.classList.add('an-wrap-full');
+        if(w.requestFullscreen) w.requestFullscreen().catch(function(){});   // jika disekat, tetap penuh dalam halaman
+    }
+    _anSyncBtn();
+    setTimeout(_anRefit, 120);
+}
+function tutupModalAnalisis(){
+    let w = _anWrap();
+    if(document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function(){});
+    if(w) w.classList.remove('an-wrap-full');
+    document.getElementById('modalCetakAnalisis').style.display = 'none';
+}
+document.addEventListener('fullscreenchange', function(){
+    let w = _anWrap();
+    if(w && !document.fullscreenElement) w.classList.remove('an-wrap-full');   // tekan Esc
+    _anSyncBtn();
+    setTimeout(_anRefit, 120);
+});
+
+// ===== AUTO-SKALA JADUAL SUPAYA MUAT LEBAR PAPARAN (tiada seret ke tepi) =====
+function fitAnalisisTable(tid){
+    let tbl = document.getElementById(tid);
+    let wrap = document.getElementById('wrap_'+tid);
+    if(!tbl || !wrap) return;
+    tbl.style.zoom = 1; tbl.style.width = '100%'; tbl.classList.remove('an-padat');
+    let cs = getComputedStyle(wrap);
+    let avail = wrap.clientWidth - parseFloat(cs.paddingLeft||0) - parseFloat(cs.paddingRight||0) - 4;
+    if(tbl.scrollWidth > avail && avail > 0){          // tak muat -> mod padat
+        tbl.classList.add('an-padat'); tbl.style.width = 'auto';
+        let need = tbl.scrollWidth;
+        if(need > avail) tbl.style.zoom = Math.max(0.45, avail/need).toFixed(3);
+    }
 }
 
 // ===== FUNGSI HIGHLIGHT =====
@@ -6909,6 +6975,27 @@ tr.hl-pilih td { background: #fef9c3 !important; }
     </div>
 </div>
 ${reportHTML}
+<script>
+(function(){
+    var land = ${orientasi === 'landscape'};
+    var mm   = parseFloat('${margin}');
+    var pageW = (land ? 297 : 210) - 2*mm;
+    var availPx = pageW * 96 / 25.4 - 6;
+    function fit(){
+        document.querySelectorAll('table').forEach(function(t){
+            t.style.zoom = 1; t.style.width = '100%'; t.classList.remove('an-padat');
+            if(t.scrollWidth > availPx){
+                t.classList.add('an-padat'); t.style.width = 'auto';
+                var need = t.scrollWidth;
+                if(need > availPx) t.style.zoom = (availPx/need).toFixed(3);
+            }
+        });
+        document.querySelectorAll('.an-wrap').forEach(function(w){ w.style.overflow='visible'; });
+    }
+    window.addEventListener('load', fit);
+    window.addEventListener('beforeprint', fit);
+})();
+<\/script>
 </body>
 </html>`;
 
