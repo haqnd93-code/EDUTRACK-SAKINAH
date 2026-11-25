@@ -4389,6 +4389,10 @@ function jalanCetakAnalisis(examPilihan){
     html += '#'+tableId+'.an-padat thead tr:first-child th:nth-child(2), #'+tableId+'.an-padat tbody td:nth-child(2) { min-width:120px !important; max-width:150px; text-align:left !important; padding:3px 5px !important; font-size:0.68rem !important; line-height:1.15; }';
     html += '#'+tableId+'.an-padat td, #'+tableId+'.an-padat th { min-width:18px; }';
     html += '@media print { .an-wrap { overflow:visible !important; max-height:none !important; } }';
+    // MOD MUAT-SKRIN (phone): semua lajur kelihatan, tanpa lajur sticky; nama dibalut supaya tidak bertindih
+    html += '#'+tableId+'.an-fit th.an-s1, #'+tableId+'.an-fit td.an-s1, #'+tableId+'.an-fit th.an-s2, #'+tableId+'.an-fit td.an-s2 { position:static !important; box-shadow:none !important; }';
+    html += '#'+tableId+'.an-padat tbody td.an-s2, #'+tableId+'.an-padat thead th.an-s2 { white-space:normal !important; word-break:break-word; overflow-wrap:anywhere; overflow:hidden; width:130px !important; min-width:130px !important; max-width:130px !important; box-sizing:border-box !important; }';
+    html += '#'+tableId+'.an-padat td.an-s1, #'+tableId+'.an-padat th.an-s1 { width:26px !important; min-width:26px !important; max-width:26px !important; }';
     // tab: sembunyikan lajur kertas lain
     for(let ki=0;ki<cfg.kertas.length;ki++){
         html += '#'+tableId+'[data-tab="'+ki+'"] [data-g]:not([data-g="'+ki+'"]) { display:none; }';
@@ -4488,14 +4492,18 @@ function fitAnalisisTable(tid){
     let tbl = document.getElementById(tid);
     let wrap = document.getElementById('wrap_'+tid);
     if(!tbl || !wrap) return;
-    tbl.style.zoom = 1; tbl.style.width = '100%'; tbl.classList.remove('an-padat');
+    tbl.style.zoom = 1; tbl.style.width = '100%'; tbl.classList.remove('an-padat','an-fit');
     let cs = getComputedStyle(wrap);
     let full = wrap.clientWidth - parseFloat(cs.paddingLeft||0) - parseFloat(cs.paddingRight||0);
     if(full > 0 && tbl.scrollWidth > full + 1){          // tak muat -> mod padat
         tbl.classList.add('an-padat'); tbl.style.width = 'auto';
         let need = tbl.scrollWidth;
-        if(need > full + 1) tbl.style.zoom = Math.max(0.45, (full-20)/need).toFixed(3);   // 20px: ruang bar skrol menegak
-        else tbl.style.width = '100%';
+        if(need > full + 1){
+            let isPhone = document.body.classList.contains('view-mobile') || window.innerWidth <= 900;
+            let minZ = isPhone ? 0.2 : 0.45;   // phone: skala sehingga SEMUA lajur muat (paparan sama seperti desktop)
+            tbl.style.zoom = Math.max(minZ, (full-6)/need).toFixed(3);
+            tbl.classList.add('an-fit');
+        } else tbl.style.width = '100%';
     }
     let r1 = tbl.querySelector('thead tr:first-child');            // tinggi baris pengepala 1 untuk sticky baris 2
     if(r1) tbl.style.setProperty('--an-h1', r1.offsetHeight + 'px');
@@ -7218,5 +7226,3 @@ ${reportHTML}
     </div>
 </body>
 </html>
-
-
